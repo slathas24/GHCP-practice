@@ -413,9 +413,9 @@ td:last-child{border-right:none}
      feedbackFolder → '/sites/HR/Shared Documents/Feedback/'
 ════════════════════════════════════════════════════════════ */
 var CONFIG = {
-  excelPath:      'Feedbackdata.xlsx',
+  excelPath:      'feedbackdata.xlsx',
   feedbackFolder: 'final/',
-  displayName:    'FeedbackMaster.xlsx'
+  displayName:    'feedbackdata.xlsx'
 };
 /* ═══════════════════════════════════════════════════════════ */
 
@@ -453,14 +453,30 @@ function fmtDate(raw){
   return pad(d.getDate())+'/'+pad(d.getMonth()+1)+'/'+d.getFullYear();
 }
 function resolvePath(p){
-  /* Convert a raw value from feedback_file_location into a fetchable URL.
-     If it's just a filename with no slashes, prepend feedbackFolder.      */
+  /*
+    Convert the raw value from the "Link" column into a full URL
+    that fetch() can reliably load on both local Python server and SharePoint.
+
+    Rules:
+      1. Already an absolute URL (http/https)  → use as-is
+      2. UNC path (\\server\...)               → flag later, can't fetch
+      3. Starts with /                          → prepend window.location.origin
+      4. Bare filename (no slashes)             → prepend origin + feedbackFolder
+      5. Relative path with slashes             → prepend origin + /
+  */
   if(!p) return '';
   p=String(p).trim();
-  if(/^https?:\/\//i.test(p)) return p;          // absolute URL — use as-is
-  if(/^\\\\/.test(p))          return p;          // UNC — flag later
-  if(!/[\/\\]/.test(p))        return CONFIG.feedbackFolder+p; // bare filename
-  return p;                                        // already has path
+
+  if(/^https?:\/\//i.test(p)) return p;                          // rule 1
+  if(/^\\\\/.test(p))          return p;                          // rule 2
+
+  var origin=window.location.origin;  // e.g. http://localhost:8080
+
+  if(p.charAt(0)==='/') return origin+p;                          // rule 3
+
+  if(!/[\/\\]/.test(p)) return origin+'/'+CONFIG.feedbackFolder+p; // rule 4
+
+  return origin+'/'+p;                                             // rule 5
 }
 
 /* ── COLUMN ALIASES ── */
@@ -472,7 +488,7 @@ var ALIASES={
   fb_given:               ['fb_given','fb given','feedback given','feedbackgiven','feedback count'],
   avg_q1:                 ['avg_q1','avg q1','avgq1','average q1','q1','avg q1 score'],
   avg_q2:                 ['avg_q2','avg q2','avgq2','average q2','q2','avg q2 score'],
-  feedback_file_location: ['feedback_file_location','feedback file location','file location','feedbackfile','feedback file','file path','filepath','feedback path'],
+  feedback_file_location: ['feedback_file_location','feedback file location','file location','feedbackfile','feedback file','file path','filepath','feedback path','link','links','url','hyperlink','feedback link','detail link','details link','feedback url','file link','document link','attachment'],
   start_date:             ['start_date','start date','startdate','program start','program_start','from date'],
   end_date:               ['end_date','end date','enddate','program end','program_end','to date'],
 };
@@ -504,7 +520,7 @@ function loadExcelData(){
   $e('btn-reload').style.display='none';
   $e('loading-path-label').textContent=CONFIG.excelPath;
 
-  fetch(CONFIG.excelPath,{credentials:'same-origin',cache:'no-cache'})
+  fetch(CONFIG.excelPath,{cache:'no-cache'})
     .then(function(r){
       if(!r.ok) throw new Error('HTTP '+r.status+' — '+r.statusText);
       return r.arrayBuffer();
@@ -654,19 +670,44 @@ function clearSearch(){
 }
 
 /* ── DOWNLOAD BAR ── */
+function getFbPath(row){
+  /* 1. Try the normalised COL map */
+  var v=String(gc(row,'feedback_file_location')||'').trim();
+  if(v) return v;
+  /* 2. Fallback: scan every key in the row against known aliases */
+  var aliases=['feedback_file_location','feedback file location','file location',
+               'feedbackfile','feedback file','file path','filepath','feedback path'];
+  var keys=Object.keys(row);
+  for(var i=0;i<keys.length;i++){
+    var kl=keys[i].toLowerCase().replace(/\s+/g,' ').trim();
+    if(aliases.indexOf(kl)!==-1){
+      v=String(row[keys[i]]||'').trim();
+      if(v) return v;
+    }
+  }
+  return '';
+}
+
 function updateDlBar(){
   var has=filteredData.length>0;
   $e('dl-bar').style.display=has?'flex':'none';
   if(!has) return;
-  var filesCount=filteredData.filter(function(r){
-    return !!String(gc(r,'feedback_file_location')||'').trim();
-  }).length;
+
+  var filesCount=filteredData.filter(function(r){ return !!getFbPath(r); }).length;
+
   $e('dl-bar-count').textContent=filteredData.length;
   $e('dl-bar-files-note').textContent=filesCount
-    ? filesCount+' feedback file'+(filesCount!==1?'s':'')+' attached'
-    : 'No feedback files attached';
-  /* disable ZIP button if no feedback files */
-  $e('btn-zip').disabled=filesCount===0;
+    ? '\uD83D\uDCCE '+filesCount+' feedback file'+(filesCount!==1?'s':'')+' attached \u2014 included in ZIP'
+    : '\u26A0 No feedback file paths found in results';
+
+  var btn=$e('btn-zip');
+  if(filesCount===0){
+    btn.setAttribute('disabled','disabled');
+    btn.title='No feedback files attached to these records';
+  } else {
+    btn.removeAttribute('disabled');
+    btn.title='Download scores CSV + '+filesCount+' feedback file'+(filesCount!==1?'s':'')+' as ZIP';
+  }
 }
 
 /* ── SUMMARY ── */
@@ -677,7 +718,7 @@ function renderSummary(){
     var f=parseFloat(gc(r,'fb_given'));         if(!isNaN(f)){fb+=f;fn++;}
     var a=parseFloat(gc(r,'avg_q1'));           if(!isNaN(a)){q1+=a;q1n++;}
     var b=parseFloat(gc(r,'avg_q2'));           if(!isNaN(b)){q2+=b;q2n++;}
-    if(String(gc(r,'feedback_file_location')||'').trim()) files++;
+    if(getFbPath(r)) files++;
   });
   $e('s-cls').textContent =filteredData.length;
   $e('s-part').textContent=pn ?parts.toLocaleString():'—';
@@ -736,7 +777,7 @@ function renderTable(){
   var bh='';
   page.forEach(function(row){
     bh+='<tr>';
-    shown.forEach(function(d){bh+='<td>'+renderCell(d.std,gc(row,d.std))+'</td>';});
+    shown.forEach(function(d){bh+='<td>'+renderCell(d.std,gc(row,d.std),row)+'</td>';});
     extras.forEach(function(c){bh+='<td>'+esc(row[c]||'')+'</td>';});
     bh+='</tr>';
   });
@@ -747,7 +788,7 @@ function renderTable(){
   renderPagination(tot);
 }
 
-function renderCell(std,raw){
+function renderCell(std,raw,row){
   var v=(raw==null)?'':raw;
 
   if(std==='start_date'||std==='end_date')
@@ -761,31 +802,23 @@ function renderCell(std,raw){
   }
 
   if(std==='feedback_file_location'){
-    var rawPath=String(v||'').trim();
+    /* Use getFbPath for robust alias-independent lookup */
+    var rawPath=row ? getFbPath(row) : String(v||'').trim();
     if(!rawPath) return '<span class="fb-na">—</span>';
 
     var resolvedPath=resolvePath(rawPath);
     var fname=rawPath.split(/[\/\\]/).pop()||rawPath;
-
-    /* store resolved path in _fbMap under a random key */
     var eid='fb_'+Math.random().toString(36).slice(2,9);
     window._fbMap[eid]=resolvedPath;
 
-    /*
-      HYPERLINK  — clicking the filename opens the preview modal
-      PREVIEW    — small button also opens preview modal
-      The text is a proper clickable link styled with .fb-link
-    */
     return '<div class="fb-cell">'
-      /* main hyperlink — the filename is the clickable text */
-      +'<button class="fb-link" onclick="openFb(\''+eid+'\')" title="Preview: '+esc(resolvedPath)+'">'
+      +'<button class="fb-link" onclick="openFb(\''+eid+'\')" title="'+esc(resolvedPath)+'">'
       +'<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" style="flex-shrink:0">'
       +'<path d="M14 4.5V14a2 2 0 01-2 2H4a2 2 0 01-2-2V2a2 2 0 012-2h6l4 4.5z"/>'
       +'<path d="M9.5 3V1.5L13 4.5H9.5V3zM4 7h8v1H4V7zm0 2h8v1H4V9zm0 2h5v1H4v-1z" fill="#fff"/>'
       +'</svg>'
       +esc(fname)
       +'</button>'
-      /* small preview label */
       +'<button class="fb-preview-btn" onclick="openFb(\''+eid+'\')" title="Preview file">👁 Preview</button>'
       +'</div>';
   }
@@ -871,10 +904,10 @@ function downloadZip(){
     return;
   }
 
-  /* collect unique feedback file paths */
+  /* collect unique feedback file paths using robust getFbPath() */
   var pathSet={};
   filteredData.forEach(function(row){
-    var raw=String(gc(row,'feedback_file_location')||'').trim();
+    var raw=getFbPath(row);
     if(raw){ var rp=resolvePath(raw); if(rp) pathSet[rp]=true; }
   });
   var paths=Object.keys(pathSet);
@@ -915,7 +948,7 @@ function downloadZip(){
       updateZipProgress(done,total);
       return Promise.resolve();
     }
-    return fetch(path,{credentials:'same-origin'})
+    return fetch(path)
       .then(function(r){
         if(!r.ok) throw new Error('HTTP '+r.status);
         return r.arrayBuffer();
@@ -991,15 +1024,20 @@ function openFb(eid){
   $e('mod-title').textContent=fname;
   $e('mod-sub').textContent=path;
   $e('mod-newtab').style.display='none';
-  $e('mod-body').innerHTML='<div class="fv-spin-wrap"><div class="spinner"></div><p>Loading…</p></div>';
+  $e('mod-body').innerHTML='<div class="fv-spin-wrap"><div class="spinner"></div><p>Loading <strong>'+esc(fname)+'</strong>…</p><p style="font-size:11px;color:#a19f9d;margin-top:6px">'+esc(path)+'</p></div>';
   $e('modal-bg').classList.add('open');
 
   if(/^\\\\/.test(path)){ showUncMsg(path); return; }
 
-  fetch(path,{credentials:'same-origin'})
-    .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status+' — '+r.statusText);return r.arrayBuffer();})
-    .then(function(buf){currentFbBlob=new Blob([buf]);renderFbContent(buf,ext,fname);})
-    .catch(function(err){showFetchErr(path,err.message);});
+  /* Use no-cors mode not needed — same origin on local server.
+     Drop credentials so Python http.server doesn't reject the request. */
+  fetch(path)
+    .then(function(r){
+      if(!r.ok) throw new Error('HTTP '+r.status+' ('+r.statusText+')\n\nURL tried: '+path);
+      return r.arrayBuffer();
+    })
+    .then(function(buf){ currentFbBlob=new Blob([buf]); renderFbContent(buf,ext,fname); })
+    .catch(function(err){ showFetchErr(path, err.message); });
 }
 
 function renderFbContent(buf,ext,fname){
@@ -1047,8 +1085,25 @@ function showUncMsg(path){
 }
 function showFetchErr(path,msg){
   $e('mod-newtab').style.display='inline-flex';
-  $e('mod-body').innerHTML='<div class="fv-err">Could not load: '+esc(msg)+'<br><code>'+esc(path)+'</code></div>'+
-    '<div class="fv-info">Make sure the file exists at that path or click <strong>Open in new tab ↗</strong>.</div>';
+  $e('mod-body').innerHTML=
+    '<div class="fv-err">'
+    +'<strong>Could not load the file</strong><br><br>'
+    +'<strong>URL tried:</strong> <code>'+esc(path)+'</code><br>'
+    +'<strong>Reason:</strong> '+esc(msg)
+    +'</div>'
+    +'<div class="fv-info">'
+    +'<strong>Check the following:</strong><br>'
+    +'1. Your folder must look like this:<br>'
+    +'&nbsp;&nbsp;<code>TrainingFeedbackPortal.html</code><br>'
+    +'&nbsp;&nbsp;<code>feedbackdata.xlsx</code><br>'
+    +'&nbsp;&nbsp;<code>final\\your_feedback_file.xlsx</code><br><br>'
+    +'2. Run Python server from <em>that same folder</em>:<br>'
+    +'&nbsp;&nbsp;<code>cd C:\\TrainingPortal</code><br>'
+    +'&nbsp;&nbsp;<code>python -m http.server 8080</code><br><br>'
+    +'3. The <strong>Link</strong> column in your Excel must contain just the filename:<br>'
+    +'&nbsp;&nbsp;<code>class101_feedback.pdf</code> (not a full path)<br><br>'
+    +'Or click <strong>Open in new tab ↗</strong> to try opening the file directly.'
+    +'</div>';
 }
 function dlFbFromModal(){
   if(currentFbBlob){ triggerDL(currentFbBlob,(currentFbPath.split(/[\/\\]/).pop()||'feedback_file')); }
