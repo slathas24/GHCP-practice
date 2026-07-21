@@ -1,0 +1,31 @@
+{
+  "secretid": "breakglass-prod-2026-07",
+  "assignment_id": "assign-0042",
+  "secret_desc": "Break-glass root password",
+  "totalshards": 3,
+  "threshold": 2,
+  "encoding": "base64",
+  "holder": [
+    {
+      "holderid": "asmith",
+      "name": "Alice Smith",
+      "email": "[email protected]",
+      "shard_index": 1,
+      "shard_value": "c2FtcGxlLXNoYXJlLWRhdGEtMQ=="
+    },
+    {
+      "holderid": "jdoe",
+      "name": "Jane Doe",
+      "email": "[email protected]",
+      "shard_index": 2,
+      "shard_value": "c2FtcGxlLXNoYXJlLWRhdGEtMg=="
+    },
+    {
+      "holderid": "bwong",
+      "name": "Bob Wong",
+      "email": "[email protected]",
+      "shard_index": 3,
+      "shard_value": "c2FtcGxlLXNoYXJlLWRhdGEtMw=="
+    }
+  ]
+}
