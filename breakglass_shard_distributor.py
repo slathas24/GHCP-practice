@@ -13,19 +13,28 @@ per holder) and for each holder:
 
 Expected input JSON shape:
 {
-  "secretid": "...",
-  "assignment_id": "...",
-  "secret_desc": "...",
-  "totalshards": 5,
-  "threshold": 3,
-  "encoding": "base64",
-  "holder": [
+  "secret": {
+    "secretid": "...",
+    "secret_desc": "...",
+    "totalshards": 3,
+    "threshold": 2,
+    "encoding": "base64",
+    "created_at": "...",
+    "rotated_at": "...",
+    "status": "active"
+  },
+  "shard_assignments": [
     {
+      "assignment_id": "assign-0042",
       "holderid": "asmith",
-      "name": "Alice Smith",
-      "email": "[email protected]",
+      "holder_name": "Alice Smith",
+      "holder_email": "[email protected]",
       "shard_index": 1,
-      "shard_value": "base64-encoded-share-data"
+      "backend_type": "local",
+      "backend_ref": "file-name",
+      "shard_value": "base64-encoded-share-data",
+      "created_at": "...",
+      "updated_at": "..."
     },
     ...
   ]
@@ -85,42 +94,56 @@ def generate_passphrase(num_bytes: int = 24) -> str:
 # ----------------------------
 
 def validate_batch(batch: dict):
-    required_top = [
-        "secretid", "assignment_id", "secret_desc",
-        "totalshards", "threshold", "encoding", "holder",
+    if "secret" not in batch:
+        raise ValueError("Missing required top-level field: secret")
+    if "shard_assignments" not in batch:
+        raise ValueError("Missing required top-level field: shard_assignments")
+
+    secret = batch["secret"]
+    required_secret_fields = [
+        "secretid", "secret_desc", "totalshards", "threshold", "encoding",
     ]
-    for field in required_top:
-        if field not in batch:
-            raise ValueError(f"Missing required top-level field: {field}")
+    for field in required_secret_fields:
+        if field not in secret:
+            raise ValueError(f"Missing required 'secret' field: {field}")
 
-    if not isinstance(batch["holder"], list) or not batch["holder"]:
-        raise ValueError("'holder' must be a non-empty list")
+    assignments = batch["shard_assignments"]
+    if not isinstance(assignments, list) or not assignments:
+        raise ValueError("'shard_assignments' must be a non-empty list")
 
-    if len(batch["holder"]) != batch["totalshards"]:
+    if len(assignments) != secret["totalshards"]:
         raise ValueError(
-            f"totalshards={batch['totalshards']} but holder list has "
-            f"{len(batch['holder'])} entries"
+            f"secret.totalshards={secret['totalshards']} but shard_assignments "
+            f"has {len(assignments)} entries"
         )
 
-    if batch["threshold"] > batch["totalshards"]:
-        raise ValueError("threshold cannot be greater than totalshards")
+    if secret["threshold"] > secret["totalshards"]:
+        raise ValueError("secret.threshold cannot be greater than secret.totalshards")
 
-    required_holder_fields = ["holderid", "name", "email", "shard_index", "shard_value"]
+    required_assignment_fields = [
+        "assignment_id", "holderid", "holder_name", "holder_email",
+        "shard_index", "shard_value",
+    ]
     seen_indices = set()
     seen_ids = set()
+    seen_assignment_ids = set()
 
-    for h in batch["holder"]:
-        for field in required_holder_fields:
-            if field not in h or h[field] in (None, ""):
-                raise ValueError(f"Holder entry missing/empty field '{field}': {h}")
+    for a in assignments:
+        for field in required_assignment_fields:
+            if field not in a or a[field] in (None, ""):
+                raise ValueError(f"shard_assignments entry missing/empty field '{field}': {a}")
 
-        if h["shard_index"] in seen_indices:
-            raise ValueError(f"Duplicate shard_index: {h['shard_index']}")
-        seen_indices.add(h["shard_index"])
+        if a["shard_index"] in seen_indices:
+            raise ValueError(f"Duplicate shard_index: {a['shard_index']}")
+        seen_indices.add(a["shard_index"])
 
-        if h["holderid"] in seen_ids:
-            raise ValueError(f"Duplicate holderid: {h['holderid']}")
-        seen_ids.add(h["holderid"])
+        if a["holderid"] in seen_ids:
+            raise ValueError(f"Duplicate holderid: {a['holderid']}")
+        seen_ids.add(a["holderid"])
+
+        if a["assignment_id"] in seen_assignment_ids:
+            raise ValueError(f"Duplicate assignment_id: {a['assignment_id']}")
+        seen_assignment_ids.add(a["assignment_id"])
 
     print("Batch validated successfully.")
 
@@ -129,19 +152,23 @@ def validate_batch(batch: dict):
 # Per-holder payload extraction
 # ----------------------------
 
-def build_holder_payload(batch: dict, holder_entry: dict) -> dict:
+def build_holder_payload(batch: dict, assignment_entry: dict) -> dict:
     """Metadata + ONLY this holder's shard - never include other holders' data."""
+    secret = batch["secret"]
     return {
-        "secretid": batch["secretid"],
-        "assignment_id": batch["assignment_id"],
-        "secret_desc": batch["secret_desc"],
-        "totalshards": batch["totalshards"],
-        "threshold": batch["threshold"],
-        "encoding": batch["encoding"],
-        "holderid": holder_entry["holderid"],
-        "name": holder_entry["name"],
-        "shard_index": holder_entry["shard_index"],
-        "shard_value": holder_entry["shard_value"],
+        "secretid": secret["secretid"],
+        "secret_desc": secret["secret_desc"],
+        "totalshards": secret["totalshards"],
+        "threshold": secret["threshold"],
+        "encoding": secret["encoding"],
+        "status": secret.get("status"),
+        "assignment_id": assignment_entry["assignment_id"],
+        "holderid": assignment_entry["holderid"],
+        "holder_name": assignment_entry["holder_name"],
+        "shard_index": assignment_entry["shard_index"],
+        "backend_type": assignment_entry.get("backend_type"),
+        "backend_ref": assignment_entry.get("backend_ref"),
+        "shard_value": assignment_entry["shard_value"],
     }
 
 
@@ -211,18 +238,20 @@ class EmailConfig:
         self.from_addr = os.environ.get("SMTP_FROM", self.smtp_user)
 
 
-def send_encrypted_shard_email(config: EmailConfig, holder_entry: dict,
-                                encrypted_blob: bytes, assignment_id: str):
+def send_encrypted_shard_email(config: EmailConfig, assignment_entry: dict,
+                                encrypted_blob: bytes):
+    assignment_id = assignment_entry["assignment_id"]
+
     msg = EmailMessage()
     msg["Subject"] = f"Break-glass shard assignment ({assignment_id})"
     msg["From"] = config.from_addr
-    msg["To"] = holder_entry["email"]
+    msg["To"] = assignment_entry["holder_email"]
 
     msg.set_content(
-        f"Hello {holder_entry['name']},\n\n"
+        f"Hello {assignment_entry['holder_name']},\n\n"
         f"Attached is your encrypted break-glass shard for assignment "
         f"'{assignment_id}'.\n"
-        f"Your shard index is {holder_entry['shard_index']}.\n\n"
+        f"Your shard index is {assignment_entry['shard_index']}.\n\n"
         f"The decryption passphrase will be provided to you separately, "
         f"through a different channel. Do not store the passphrase alongside "
         f"this file, and do not forward this email with the passphrase attached.\n\n"
@@ -230,7 +259,7 @@ def send_encrypted_shard_email(config: EmailConfig, holder_entry: dict,
         f"the file successfully.\n"
     )
 
-    filename = f"shard_{holder_entry['holderid']}_{assignment_id}.enc"
+    filename = f"shard_{assignment_entry['holderid']}_{assignment_id}.enc"
     msg.add_attachment(
         encrypted_blob,
         maintype="application",
@@ -243,7 +272,7 @@ def send_encrypted_shard_email(config: EmailConfig, holder_entry: dict,
         server.login(config.smtp_user, config.smtp_password)
         server.send_message(msg)
 
-    print(f"  -> Emailed encrypted shard to {holder_entry['email']} ({holder_entry['holderid']})")
+    print(f"  -> Emailed encrypted shard to {assignment_entry['holder_email']} ({assignment_entry['holderid']})")
 
 
 # ----------------------------
@@ -259,33 +288,34 @@ def process_and_send_batch(batch: dict, email_config: EmailConfig,
 
     results = []
 
-    for holder_entry in batch["holder"]:
-        holder_id = holder_entry["holderid"]
-        print(f"Processing holder '{holder_id}'...")
+    for assignment_entry in batch["shard_assignments"]:
+        holder_id = assignment_entry["holderid"]
+        assignment_id = assignment_entry["assignment_id"]
+        print(f"Processing holder '{holder_id}' (assignment '{assignment_id}')...")
 
         # Unique passphrase per holder - generated fresh each iteration
         passphrase = generate_passphrase()
 
-        payload = build_holder_payload(batch, holder_entry)
+        payload = build_holder_payload(batch, assignment_entry)
         encrypted_blob = encrypt_payload(payload, passphrase)
 
         enc_filename = os.path.join(
-            enc_dir, f"shard_{holder_id}_{batch['assignment_id']}.enc"
+            enc_dir, f"shard_{holder_id}_{assignment_id}.enc"
         )
         write_restricted_file(enc_filename, encrypted_blob)
 
         key_filename = os.path.join(
-            key_dir, f"shard_{holder_id}_{batch['assignment_id']}.key"
+            key_dir, f"shard_{holder_id}_{assignment_id}.key"
         )
         write_restricted_file(key_filename, passphrase.encode("utf-8"))
 
         if send_email:
-            send_encrypted_shard_email(email_config, holder_entry, encrypted_blob,
-                                        batch["assignment_id"])
+            send_encrypted_shard_email(email_config, assignment_entry, encrypted_blob)
 
         results.append({
             "holder_id": holder_id,
-            "email": holder_entry["email"],
+            "assignment_id": assignment_id,
+            "email": assignment_entry["holder_email"],
             "enc_file": enc_filename,
             "key_file": key_filename,
         })
