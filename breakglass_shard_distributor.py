@@ -59,10 +59,14 @@ import json
 import os
 import stat
 import secrets
-import smtplib
+import tempfile
 import argparse
 import sys
-from email.message import EmailMessage
+
+try:
+    import win32com.client  # pywin32 - requires Windows + Outlook installed
+except ImportError:
+    win32com = None
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -224,30 +228,45 @@ def make_restricted_dir(path: str):
 
 
 # ----------------------------
-# Email delivery (encrypted file only - key is NEVER emailed)
+# Email delivery via Outlook COM automation
+# (encrypted file only - key is NEVER emailed)
 # ----------------------------
 
 class EmailConfig:
-    """Reads SMTP settings from environment variables - never hardcode credentials."""
+    """
+    Placeholder config for Outlook sending. Outlook COM automation uses
+    whatever account is currently signed into the local Outlook desktop
+    client - there's no host/user/password to supply, unlike SMTP.
 
-    def __init__(self):
-        self.smtp_host = os.environ["SMTP_HOST"]
-        self.smtp_port = int(os.environ.get("SMTP_PORT", 587))
-        self.smtp_user = os.environ["SMTP_USER"]
-        self.smtp_password = os.environ["SMTP_PASSWORD"]
-        self.from_addr = os.environ.get("SMTP_FROM", self.smtp_user)
+    display_only: if True, opens each email in Outlook for manual review
+                  instead of sending immediately (useful for a first dry run).
+    """
+
+    def __init__(self, display_only: bool = False):
+        self.display_only = display_only
+
+
+def _require_outlook():
+    if win32com is None:
+        raise RuntimeError(
+            "pywin32 is not installed or this isn't running on Windows. "
+            "Install with: pip install pywin32"
+        )
 
 
 def send_encrypted_shard_email(config: EmailConfig, assignment_entry: dict,
                                 encrypted_blob: bytes):
+    """
+    Sends the encrypted shard file as an Outlook email via COM automation,
+    using the Outlook desktop client already signed in on this machine.
+    """
+    _require_outlook()
+
     assignment_id = assignment_entry["assignment_id"]
+    holder_id = assignment_entry["holderid"]
+    filename = f"shard_{holder_id}_{assignment_id}.enc"
 
-    msg = EmailMessage()
-    msg["Subject"] = f"Break-glass shard assignment ({assignment_id})"
-    msg["From"] = config.from_addr
-    msg["To"] = assignment_entry["holder_email"]
-
-    msg.set_content(
+    body = (
         f"Hello {assignment_entry['holder_name']},\n\n"
         f"Attached is your encrypted break-glass shard for assignment "
         f"'{assignment_id}'.\n"
@@ -259,20 +278,39 @@ def send_encrypted_shard_email(config: EmailConfig, assignment_entry: dict,
         f"the file successfully.\n"
     )
 
-    filename = f"shard_{assignment_entry['holderid']}_{assignment_id}.enc"
-    msg.add_attachment(
-        encrypted_blob,
-        maintype="application",
-        subtype="octet-stream",
-        filename=filename,
-    )
+    # Outlook's COM API attaches files by path on disk, not raw bytes, so the
+    # encrypted blob is written to a temp file first, attached, then removed.
+    tmp_dir = tempfile.mkdtemp(prefix="shard_mail_")
+    tmp_path = os.path.join(tmp_dir, filename)
 
-    with smtplib.SMTP(config.smtp_host, config.smtp_port) as server:
-        server.starttls()
-        server.login(config.smtp_user, config.smtp_password)
-        server.send_message(msg)
+    try:
+        write_restricted_file(tmp_path, encrypted_blob)
 
-    print(f"  -> Emailed encrypted shard to {assignment_entry['holder_email']} ({assignment_entry['holderid']})")
+        outlook = win32com.client.Dispatch("Outlook.Application")
+        mail = outlook.CreateItem(0)  # 0 = olMailItem
+        mail.Subject = f"Break-glass shard assignment ({assignment_id})"
+        mail.Body = body
+        mail.To = assignment_entry["holder_email"]
+        mail.Attachments.Add(tmp_path)
+
+        if config.display_only:
+            mail.Display(False)
+            print(f"  -> Opened draft in Outlook for {assignment_entry['holder_email']} "
+                  f"({holder_id}) - review and send manually")
+        else:
+            #mail.Send()
+            mail.Display(False)
+            print(f"  -> Sent via Outlook to {assignment_entry['holder_email']} ({holder_id})")
+
+    finally:
+        # Clean up the temp file/dir regardless of success or failure -
+        # it briefly holds the encrypted shard on disk, so don't leave it behind.
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            os.rmdir(tmp_dir)
+        except OSError:
+            pass
 
 
 # ----------------------------
@@ -450,6 +488,9 @@ def main():
                               help="Directory to store passphrase files (default: keys_out)")
     dist_parser.add_argument("--no-email", action="store_true",
                               help="Skip sending emails; only generate encrypted files + keys locally")
+    dist_parser.add_argument("--display-only", action="store_true",
+                              help="Open each email as a draft in Outlook for manual review instead "
+                                   "of sending immediately")
 
     # --- decrypt subcommand (new) ---
     dec_parser = subparsers.add_parser(
@@ -493,11 +534,14 @@ def main():
 
     email_config = None
     if not args.no_email:
-        try:
-            email_config = EmailConfig()
-        except KeyError as e:
-            print(f"Missing required SMTP environment variable: {e}")
+        if win32com is None:
+            print(
+                "Error: pywin32 is not installed, or this isn't running on Windows "
+                "with Outlook installed. Install with: pip install pywin32\n"
+                "Use --no-email to skip sending and just generate files locally."
+            )
             sys.exit(1)
+        email_config = EmailConfig(display_only=args.display_only)
 
     results = process_and_send_batch(
         batch,
